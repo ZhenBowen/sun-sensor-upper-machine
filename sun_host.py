@@ -2,11 +2,11 @@
 
 from collections import deque
 import time
-from typing import Iterable, Optional
+from typing import Optional
 
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
-from sun_protocol import TelemetryParser, pack_command
+from sun_protocol import EB90Parser, TelemetryParser, hex_text_to_bytes, pack_command
 from sun_simulator import SunSimulator
 
 try:
@@ -82,11 +82,18 @@ class SimulatorThread(_TelemetryThread):
 
 
 class SerialThread(_TelemetryThread):
-    def __init__(self, port: str, baudrate: int = 115200, timeout_s: float = 0.1) -> None:
+    def __init__(
+        self,
+        port: str,
+        baudrate: int = 115200,
+        timeout_s: float = 0.1,
+        protocol: str = "recommended",
+    ) -> None:
         super().__init__()
         self.port = port
         self.baudrate = baudrate
         self.timeout_s = timeout_s
+        self.protocol = protocol
         self._serial = None
 
     def run(self) -> None:
@@ -95,14 +102,14 @@ class SerialThread(_TelemetryThread):
             return
 
         self._running = True
-        parser = TelemetryParser()
+        parser = self._make_parser()
         meter = RateMeter()
         try:
             self._serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout_s)
-            self.status_changed.emit(f"Serial opened: {self.port} @ {self.baudrate}")
+            self.status_changed.emit(f"Serial opened: {self.port} @ {self.baudrate}, protocol={self.protocol}")
             while self._running:
-                waiting = getattr(self._serial, "in_waiting", 0) or 1
-                data = self._serial.read(waiting)
+                waiting = getattr(self._serial, "in_waiting", 0)
+                data = self._serial.read(waiting if waiting > 0 else 1)
                 if not data:
                     continue
                 self.raw_bytes_received.emit(data)
@@ -134,6 +141,11 @@ class SerialThread(_TelemetryThread):
         except Exception:
             pass
 
+    def _make_parser(self):
+        if self.protocol == "eb90":
+            return EB90Parser()
+        return TelemetryParser()
+
 
 class SunHost(QObject):
     telemetry_received = pyqtSignal(object)
@@ -156,9 +168,9 @@ class SunHost(QObject):
         self._connect_thread_signals(self._thread)
         self._thread.start()
 
-    def start_serial(self, port: str, baudrate: int = 115200) -> None:
+    def start_serial(self, port: str, baudrate: int = 115200, protocol: str = "recommended") -> None:
         self.stop()
-        self._thread = SerialThread(port=port, baudrate=baudrate)
+        self._thread = SerialThread(port=port, baudrate=baudrate, protocol=protocol)
         self._connect_thread_signals(self._thread)
         self._thread.start()
 
@@ -176,6 +188,15 @@ class SunHost(QObject):
             self.status_changed.emit(f"Command sent: 0x{cmd_id:02X}")
         else:
             self.status_changed.emit(f"Command built but not sent: 0x{cmd_id:02X}")
+        return data
+
+    def send_raw_hex(self, text: str) -> bytes:
+        data = hex_text_to_bytes(text)
+        if isinstance(self._thread, SerialThread) and self._thread.isRunning():
+            self._thread.send(data)
+            self.status_changed.emit(f"Raw hex sent: {data.hex(' ').upper()}")
+        else:
+            self.status_changed.emit(f"Raw hex built but not sent: {data.hex(' ').upper()}")
         return data
 
     def _connect_thread_signals(self, thread: _TelemetryThread) -> None:

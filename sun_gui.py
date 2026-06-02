@@ -3,8 +3,9 @@
 from datetime import datetime
 from pathlib import Path
 import struct
+import time
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -41,8 +42,15 @@ class SunMainWindow(QMainWindow):
         self.logger = SunCsvLogger()
         self.latest_stats = TelemetryStats()
         self.log_dir = Path(__file__).resolve().parent / "logs"
+        self._last_error_dialog_time = 0.0
+        self._error_dialog_interval_s = 5.0
+        self._last_telemetry_time = 0.0
+        self._data_timeout_s = 5.0
         self._build_ui()
         self._connect_signals()
+        self._timeout_timer = QTimer(self)
+        self._timeout_timer.timeout.connect(self._check_timeout)
+        self._timeout_timer.start(2000)
         self.refresh_ports()
         self.statusBar().showMessage("Ready")
 
@@ -73,6 +81,10 @@ class SunMainWindow(QMainWindow):
         self.source_combo.addItem("Simulator: drop frame", "sim_drop")
         self.source_combo.addItem("Serial / USB-RS485", "serial")
 
+        self.protocol_combo = QComboBox()
+        self.protocol_combo.addItem("Recommended 32-byte", "recommended")
+        self.protocol_combo.addItem("EB90 spot x/y", "eb90")
+
         self.port_combo = QComboBox()
         self.refresh_button = QPushButton("Refresh")
         self.baud_combo = QComboBox()
@@ -87,6 +99,8 @@ class SunMainWindow(QMainWindow):
 
         layout.addWidget(QLabel("Source"))
         layout.addWidget(self.source_combo)
+        layout.addWidget(QLabel("Protocol"))
+        layout.addWidget(self.protocol_combo)
         layout.addWidget(QLabel("Port"))
         layout.addWidget(self.port_combo)
         layout.addWidget(self.refresh_button)
@@ -142,16 +156,21 @@ class SunMainWindow(QMainWindow):
     def _build_command_box(self) -> QGroupBox:
         box = QGroupBox("Reserved Commands")
         layout = QGridLayout(box)
+        self.raw_hex_edit = QLineEdit("eb 90 11 00 8c")
+        self.raw_send_button = QPushButton("Send Raw Hex")
         self.query_button = QPushButton("Query Telemetry")
         self.rate10_button = QPushButton("Set 10 Hz")
         self.cal_on_button = QPushButton("Cal Mode On")
         self.cal_off_button = QPushButton("Cal Mode Off")
         self.reset_button = QPushButton("Reset Device")
-        layout.addWidget(self.query_button, 0, 0)
-        layout.addWidget(self.rate10_button, 0, 1)
-        layout.addWidget(self.cal_on_button, 1, 0)
-        layout.addWidget(self.cal_off_button, 1, 1)
-        layout.addWidget(self.reset_button, 2, 0, 1, 2)
+        layout.addWidget(QLabel("Raw Hex"), 0, 0)
+        layout.addWidget(self.raw_hex_edit, 0, 1)
+        layout.addWidget(self.raw_send_button, 1, 0, 1, 2)
+        layout.addWidget(self.query_button, 2, 0)
+        layout.addWidget(self.rate10_button, 2, 1)
+        layout.addWidget(self.cal_on_button, 3, 0)
+        layout.addWidget(self.cal_off_button, 3, 1)
+        layout.addWidget(self.reset_button, 4, 0, 1, 2)
         return box
 
     def _build_event_box(self) -> QGroupBox:
@@ -179,6 +198,7 @@ class SunMainWindow(QMainWindow):
         self.cal_on_button.clicked.connect(lambda: self.send_command(0x04, b"\x01"))
         self.cal_off_button.clicked.connect(lambda: self.send_command(0x04, b"\x00"))
         self.reset_button.clicked.connect(lambda: self.send_command(0x06, b""))
+        self.raw_send_button.clicked.connect(self.send_raw_hex)
 
     def refresh_ports(self) -> None:
         current = self.port_combo.currentText()
@@ -203,10 +223,11 @@ class SunMainWindow(QMainWindow):
         if source == "serial":
             port = self.port_combo.currentText().strip()
             baudrate = int(self.baud_combo.currentText())
+            protocol = self.protocol_combo.currentData()
             if not port:
                 QMessageBox.warning(self, "No port", "Select a serial port first.")
                 return
-            self.host.start_serial(port=port, baudrate=baudrate)
+            self.host.start_serial(port=port, baudrate=baudrate, protocol=protocol)
         else:
             mode_map = {
                 "sim_normal": "normal",
@@ -248,6 +269,7 @@ class SunMainWindow(QMainWindow):
         self.latest_stats = stats
 
     def on_telemetry(self, telemetry) -> None:
+        self._last_telemetry_time = time.monotonic()
         self.monitor.update_telemetry(telemetry, self.latest_stats)
         if self.logger.is_active:
             try:
@@ -259,7 +281,7 @@ class SunMainWindow(QMainWindow):
                 self.log_status_label.setText("logging stopped by error")
                 self.on_error(f"CSV write failed: {exc}")
         self.statusBar().showMessage(
-            f"seq={telemetry.seq} alpha={telemetry.alpha_deg:.2f} beta={telemetry.beta_deg:.2f} rate={self.latest_stats.frame_rate_hz:.2f} Hz"
+            f"x={telemetry.spot_x:.4f} y={telemetry.spot_y:.4f} sun={telemetry.sun_present} rate={self.latest_stats.frame_rate_hz:.2f} Hz"
         )
 
     def on_status(self, message: str) -> None:
@@ -269,7 +291,11 @@ class SunMainWindow(QMainWindow):
     def on_error(self, message: str) -> None:
         self.append_event(f"ERROR: {message}")
         self.statusBar().showMessage(f"ERROR: {message}")
-        QMessageBox.warning(self, "Sun upper machine error", message)
+        self.connect_button.setText("Connect" if not self.host.is_running else "Disconnect")
+        now = time.monotonic()
+        if now - self._last_error_dialog_time >= self._error_dialog_interval_s:
+            self._last_error_dialog_time = now
+            QMessageBox.warning(self, "Sun upper machine error", message)
 
     def send_command(self, cmd_id: int, payload: bytes) -> None:
         node_id = self.node_spin.value()
@@ -279,6 +305,14 @@ class SunMainWindow(QMainWindow):
             self.on_error(str(exc))
             return
         self.append_event(f"Command 0x{cmd_id:02X}: {data.hex(' ')}")
+
+    def send_raw_hex(self) -> None:
+        try:
+            data = self.host.send_raw_hex(self.raw_hex_edit.text())
+        except Exception as exc:
+            self.on_error(str(exc))
+            return
+        self.append_event(f"Raw hex: {data.hex(' ').upper()}")
 
     def current_calibration(self) -> CalibrationContext:
         return CalibrationContext(
@@ -291,6 +325,15 @@ class SunMainWindow(QMainWindow):
     def append_event(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
         self.event_log.appendPlainText(f"[{stamp}] {message}")
+
+    def _check_timeout(self) -> None:
+        if not self.host.is_running:
+            return
+        if self._last_telemetry_time <= 0:
+            return
+        elapsed = time.monotonic() - self._last_telemetry_time
+        if elapsed >= self._data_timeout_s:
+            self.statusBar().showMessage(f"WARNING: no telemetry data for {elapsed:.1f} seconds")
 
     @staticmethod
     def _float_from_edit(edit: QLineEdit, default: float) -> float:

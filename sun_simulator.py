@@ -25,11 +25,11 @@ class SunSimulator:
 
     def next_telemetry(self) -> SunTelemetry:
         self._frame_index += 1
-        if self.mode == "drop_frame" and self.drop_frame_every > 0 and self._frame_index % self.drop_frame_every == 0:
-            self._seq = (self._seq + 2) & 0xFFFF
 
         seq = self._seq
         self._seq = (self._seq + 1) & 0xFFFF
+        if self.mode == "drop_frame" and self.drop_frame_every > 0 and self._frame_index % self.drop_frame_every == 0:
+            self._seq = (self._seq + 1) & 0xFFFF
         self._timestamp_ms += int(round(1000.0 / max(self.rate_hz, 0.1)))
 
         t = self._frame_index / max(self.rate_hz, 0.1)

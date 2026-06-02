@@ -1,10 +1,9 @@
 ﻿from __future__ import annotations
 
 import struct
-from dataclasses import replace
 from typing import List, Optional
 
-from sun_models import SunTelemetry, TelemetryStats
+from sun_models import SpotTelemetry, SunTelemetry, TelemetryStats
 
 
 SOF = b"\x55\xAA"
@@ -15,9 +14,12 @@ MSG_TYPE_COMMAND = 0x80
 TELEMETRY_PAYLOAD_LEN = 24
 TELEMETRY_FRAME_LEN = 2 + 4 + TELEMETRY_PAYLOAD_LEN + 2
 MAX_PAYLOAD_LEN = 128
+EB90_SOF = b"\xEB\x90"
+EB90_FRAME_LEN = 26
 
 _HEADER_STRUCT = struct.Struct("<HBBBB")
 _PAYLOAD_STRUCT = struct.Struct("<HIHHHHhhhBBH")
+_EB90_SPOT_STRUCT = struct.Struct(">f f")
 
 
 class ProtocolError(ValueError):
@@ -123,6 +125,47 @@ def parse_telemetry_frame(frame: bytes) -> SunTelemetry:
     )
 
 
+def parse_eb90_frame(frame: bytes) -> SpotTelemetry:
+    if len(frame) != EB90_FRAME_LEN:
+        raise ProtocolError(f"invalid EB90 frame length: {len(frame)}")
+    if frame[:2] != EB90_SOF:
+        raise ProtocolError("invalid EB90 header")
+
+    expected_checksum = sum(frame[:-1]) & 0xFF
+    actual_checksum = frame[-1]
+    if actual_checksum != expected_checksum:
+        raise BadCrcError(
+            f"bad EB90 checksum: expected 0x{expected_checksum:02X}, got 0x{actual_checksum:02X}"
+        )
+
+    sun_present = frame[2]
+    x, y = _EB90_SPOT_STRUCT.unpack(frame[3:11])
+    return SpotTelemetry(
+        sun_present=sun_present,
+        x=x,
+        y=y,
+        raw_frame_hex=frame.hex(" ").upper(),
+    )
+
+
+def pack_eb90_frame(sun_present: int, x: float, y: float, tail: bytes | None = None) -> bytes:
+    tail_bytes = tail if tail is not None else b"\x00" * (EB90_FRAME_LEN - 12)
+    if len(tail_bytes) != EB90_FRAME_LEN - 12:
+        raise ValueError(f"EB90 tail must be {EB90_FRAME_LEN - 12} bytes")
+    body = EB90_SOF + bytes([sun_present & 0xFF]) + _EB90_SPOT_STRUCT.pack(float(x), float(y)) + tail_bytes
+    return body + bytes([sum(body) & 0xFF])
+
+
+def hex_text_to_bytes(text: str) -> bytes:
+    compact = "".join(text.strip().replace(",", " ").split())
+    if len(compact) % 2:
+        raise ValueError("hex string must contain an even number of digits")
+    try:
+        return bytes.fromhex(compact)
+    except ValueError as exc:
+        raise ValueError("hex string contains non-hex characters") from exc
+
+
 def pack_command(node_id: int, cmd_id: int, payload: bytes = b"", version: int = PROTOCOL_VERSION) -> bytes:
     if len(payload) > 255:
         raise ValueError("command payload is too long")
@@ -216,3 +259,60 @@ class TelemetryParser:
         if seq != expected:
             self.drop_count += (seq - expected) & 0xFFFF
         self._last_seq = seq
+
+
+class EB90Parser:
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self.crc_error_count = 0
+        self.frame_error_count = 0
+        self.drop_count = 0
+        self.frame_count = 0
+        self.byte_count = 0
+
+    def feed(self, data: bytes) -> List[SpotTelemetry]:
+        if not data:
+            return []
+        self.byte_count += len(data)
+        self._buffer.extend(data)
+        parsed: List[SpotTelemetry] = []
+
+        while True:
+            start = self._buffer.find(EB90_SOF)
+            if start < 0:
+                if self._buffer[-1:] == EB90_SOF[:1]:
+                    del self._buffer[:-1]
+                else:
+                    self._buffer.clear()
+                break
+            if start > 0:
+                del self._buffer[:start]
+            if len(self._buffer) < EB90_FRAME_LEN:
+                break
+
+            frame = bytes(self._buffer[:EB90_FRAME_LEN])
+            try:
+                telemetry = parse_eb90_frame(frame)
+            except BadCrcError:
+                self.crc_error_count += 1
+                del self._buffer[0]
+                continue
+            except ProtocolError:
+                self.frame_error_count += 1
+                del self._buffer[0]
+                continue
+
+            del self._buffer[:EB90_FRAME_LEN]
+            self.frame_count += 1
+            parsed.append(telemetry)
+
+        return parsed
+
+    def stats(self, frame_rate_hz: float = 0.0) -> TelemetryStats:
+        return TelemetryStats(
+            frame_rate_hz=frame_rate_hz,
+            drop_count=self.drop_count,
+            crc_error_count=self.crc_error_count,
+            frame_count=self.frame_count,
+            byte_count=self.byte_count,
+        )

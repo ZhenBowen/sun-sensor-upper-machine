@@ -8,11 +8,16 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from sun_models import SunTelemetry
 from sun_protocol import (
+    EB90Parser,
+    EB90_FRAME_LEN,
     TELEMETRY_FRAME_LEN,
     TelemetryParser,
     crc16_modbus,
+    hex_text_to_bytes,
+    pack_eb90_frame,
     pack_command,
     pack_telemetry,
+    parse_eb90_frame,
     parse_telemetry_frame,
 )
 
@@ -127,6 +132,57 @@ class TestSunProtocol(unittest.TestCase):
         expected_crc = crc16_modbus(command[2:-2])
         actual_crc = int.from_bytes(command[-2:], "little")
         self.assertEqual(actual_crc, expected_crc)
+
+    def test_parse_eb90_example_frame_extracts_spot_xy(self):
+        frame = hex_text_to_bytes(
+            "EB 90 00 00 00 00 00 00 00 00 00 00 19 00 32 00 51 00 45 1C 08 00 11 00 00 91"
+        )
+
+        parsed = parse_eb90_frame(frame)
+
+        self.assertEqual(len(frame), EB90_FRAME_LEN)
+        self.assertEqual(parsed.sun_present, 0)
+        self.assertAlmostEqual(parsed.x, 0.0)
+        self.assertAlmostEqual(parsed.y, 0.0)
+        self.assertEqual(parsed.raw_frame_hex, frame.hex(" ").upper())
+
+    def test_pack_and_parse_eb90_frame_with_sun_present(self):
+        frame = pack_eb90_frame(sun_present=1, x=12.5, y=-3.25)
+
+        parsed = parse_eb90_frame(frame)
+
+        self.assertEqual(frame[:3], b"\xEB\x90\x01")
+        self.assertAlmostEqual(parsed.x, 12.5)
+        self.assertAlmostEqual(parsed.y, -3.25)
+        self.assertTrue(parsed.valid_flag)
+
+    def test_eb90_parser_handles_split_sticky_and_noise(self):
+        frame_a = pack_eb90_frame(sun_present=1, x=1.25, y=2.5)
+        frame_b = pack_eb90_frame(sun_present=0, x=-4.0, y=8.0)
+        parser = EB90Parser()
+
+        self.assertEqual(parser.feed(b"noise" + frame_a[:7]), [])
+        parsed = parser.feed(frame_a[7:] + frame_b)
+
+        self.assertEqual(len(parsed), 2)
+        self.assertAlmostEqual(parsed[0].x, 1.25)
+        self.assertAlmostEqual(parsed[0].y, 2.5)
+        self.assertEqual(parsed[1].sun_present, 0)
+        self.assertAlmostEqual(parsed[1].x, -4.0)
+        self.assertAlmostEqual(parsed[1].y, 8.0)
+
+    def test_eb90_parser_rejects_bad_checksum(self):
+        frame = bytearray(pack_eb90_frame(sun_present=1, x=1.0, y=2.0))
+        frame[-1] ^= 0xFF
+        parser = EB90Parser()
+
+        parsed = parser.feed(bytes(frame))
+
+        self.assertEqual(parsed, [])
+        self.assertEqual(parser.crc_error_count, 1)
+
+    def test_hex_text_to_bytes_accepts_spaces_and_commas(self):
+        self.assertEqual(hex_text_to_bytes("eb 90, 11 00 8c"), b"\xEB\x90\x11\x00\x8C")
 
 
 if __name__ == "__main__":

@@ -21,11 +21,16 @@ CSV_FIELDS = [
     "adc_vay2",
     "alpha_deg",
     "beta_deg",
+    "x",
+    "y",
     "temp_c",
     "sun_present",
     "saturation_flag",
     "status_word",
     "valid_flag",
+    "signal_sum",
+    "rx",
+    "ry",
     "frame_rate_hz",
     "drop_count",
     "crc_error_count",
@@ -33,15 +38,19 @@ CSV_FIELDS = [
     "beta_ref_deg",
     "test_point",
     "comment",
+    "raw_frame_hex",
 ]
 
 
 class SunCsvLogger:
+    FLUSH_INTERVAL = 10
+
     def __init__(self) -> None:
         self._handle: Optional[TextIO] = None
         self._writer: Optional[csv.DictWriter] = None
         self.path: Optional[Path] = None
         self.rows_written = 0
+        self._rows_since_flush = 0
 
     @property
     def is_active(self) -> bool:
@@ -57,6 +66,7 @@ class SunCsvLogger:
         self._writer.writeheader()
         self._handle.flush()
         self.rows_written = 0
+        self._rows_since_flush = 0
         return self.path
 
     def write(
@@ -80,11 +90,16 @@ class SunCsvLogger:
             "adc_vay2": str(telemetry.adc_vay2),
             "alpha_deg": f"{telemetry.alpha_deg:.2f}",
             "beta_deg": f"{telemetry.beta_deg:.2f}",
+            "x": f"{telemetry.spot_x:.6f}",
+            "y": f"{telemetry.spot_y:.6f}",
             "temp_c": f"{telemetry.temp_c:.2f}",
             "sun_present": str(int(bool(telemetry.sun_present))),
             "saturation_flag": str(int(bool(telemetry.saturation_flag))),
             "status_word": f"0x{telemetry.status_word:04X}",
             "valid_flag": str(int(telemetry.valid_flag)),
+            "signal_sum": str(telemetry.signal_sum),
+            "rx": f"{telemetry.rx:.6f}",
+            "ry": f"{telemetry.ry:.6f}",
             "frame_rate_hz": f"{stats.frame_rate_hz:.2f}",
             "drop_count": str(stats.drop_count),
             "crc_error_count": str(stats.crc_error_count),
@@ -92,10 +107,14 @@ class SunCsvLogger:
             "beta_ref_deg": f"{calibration.beta_ref_deg:.2f}",
             "test_point": calibration.test_point,
             "comment": calibration.comment,
+            "raw_frame_hex": telemetry.raw_frame_hex,
         }
         self._writer.writerow(row)
-        self._handle.flush()
         self.rows_written += 1
+        self._rows_since_flush += 1
+        if self._rows_since_flush >= self.FLUSH_INTERVAL:
+            self._handle.flush()
+            self._rows_since_flush = 0
 
     def stop(self) -> None:
         if self._handle is not None:
