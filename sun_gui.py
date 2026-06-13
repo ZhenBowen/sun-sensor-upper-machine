@@ -287,6 +287,9 @@ class SunMainWindow(QMainWindow):
             if not self._capture_pending:
                 return
             self._capture_pending = False
+            self._capture_count += 1
+            self.capture_button.setText(f"采集({self._capture_count})")
+            self.append_event(f"采集 #{self._capture_count}: alpha={telemetry.spot_x:.4f} beta={telemetry.spot_y:.4f}")
         self._last_telemetry_time = time.monotonic()
         self.monitor.update_telemetry(telemetry, self.latest_stats)
         if self.logger.is_active:
@@ -339,7 +342,10 @@ class SunMainWindow(QMainWindow):
         self._capture_pending = True
         if isinstance(self.host._thread, SerialThread):
             self.send_command(0x01, b"")
-        self.append_event("采集: 等待数据...")
+            self.append_event("采集: 已发送查询指令, 等待回帧...")
+        else:
+            self.append_event("采集: 等待下一帧模拟数据...")
+        self.statusBar().showMessage("采集: 等待数据...")
 
     def acquire_combo_changed(self) -> None:
         on_demand = self.acquisition_combo.currentData() == "on_demand"
