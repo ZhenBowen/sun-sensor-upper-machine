@@ -251,6 +251,8 @@ class SunMainWindow(QMainWindow):
             self.host.start_simulator(node_id=node_id, rate_hz=float(self.rate_spin.value()), mode=mode_map[source], protocol=protocol)
 
         self.monitor.clear()
+        self._capture_count = 0
+        self.capture_button.setText("采集")
         self.connect_button.setText("Disconnect")
 
     def choose_log_dir(self) -> None:
@@ -287,6 +289,7 @@ class SunMainWindow(QMainWindow):
             if not self._capture_pending:
                 return
             self._capture_pending = False
+            self._capture_count += 1
             self._capture_count += 1
             self.capture_button.setText(f"采集({self._capture_count})")
             self.append_event(f"采集 #{self._capture_count}: alpha={telemetry.spot_x:.4f} beta={telemetry.spot_y:.4f}")
@@ -350,6 +353,10 @@ class SunMainWindow(QMainWindow):
     def acquire_combo_changed(self) -> None:
         on_demand = self.acquisition_combo.currentData() == "on_demand"
         self.capture_button.setEnabled(on_demand)
+        if not on_demand:
+            self._capture_pending = False
+            self._capture_count = 0
+            self.capture_button.setText("采集")
 
     def current_calibration(self) -> CalibrationContext:
         return CalibrationContext(
