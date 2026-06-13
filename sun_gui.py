@@ -290,7 +290,6 @@ class SunMainWindow(QMainWindow):
                 return
             self._capture_pending = False
             self._capture_count += 1
-            self._capture_count += 1
             self.capture_button.setText(f"采集({self._capture_count})")
             self.append_event(f"采集 #{self._capture_count}: alpha={telemetry.spot_x:.4f} beta={telemetry.spot_y:.4f}")
         self._last_telemetry_time = time.monotonic()
