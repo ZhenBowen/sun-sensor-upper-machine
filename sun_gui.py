@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sun_host import SunHost, available_serial_ports
+from sun_host import SerialThread, SunHost, available_serial_ports
 from sun_logger import SunCsvLogger
 from sun_models import CalibrationContext, TelemetryStats
 from sun_monitor import SunMonitorWidget
@@ -46,6 +46,7 @@ class SunMainWindow(QMainWindow):
         self._error_dialog_interval_s = 5.0
         self._last_telemetry_time = 0.0
         self._data_timeout_s = 5.0
+        self._capture_pending = False
         self._build_ui()
         self._connect_signals()
         self._timeout_timer = QTimer(self)
@@ -96,6 +97,11 @@ class SunMainWindow(QMainWindow):
         self.rate_spin = QSpinBox()
         self.rate_spin.setRange(1, 100)
         self.rate_spin.setValue(10)
+        self.acquisition_combo = QComboBox()
+        self.acquisition_combo.addItem("自动采集", "continuous")
+        self.acquisition_combo.addItem("逐点采集", "on_demand")
+        self.capture_button = QPushButton("采集")
+        self.capture_button.setEnabled(False)
         self.connect_button = QPushButton("Connect")
 
         layout.addWidget(QLabel("Source"))
@@ -111,6 +117,9 @@ class SunMainWindow(QMainWindow):
         layout.addWidget(self.node_spin)
         layout.addWidget(QLabel("Hz"))
         layout.addWidget(self.rate_spin)
+        layout.addWidget(QLabel("Mode"))
+        layout.addWidget(self.acquisition_combo)
+        layout.addWidget(self.capture_button)
         layout.addStretch(1)
         layout.addWidget(self.connect_button)
         return box
@@ -188,6 +197,7 @@ class SunMainWindow(QMainWindow):
         self.connect_button.clicked.connect(self.toggle_connection)
         self.browse_log_button.clicked.connect(self.choose_log_dir)
         self.log_button.clicked.connect(self.toggle_logging)
+        self.acquire_combo_changed()
 
         self.host.telemetry_received.connect(self.on_telemetry)
         self.host.stats_updated.connect(self.on_stats)
@@ -200,6 +210,8 @@ class SunMainWindow(QMainWindow):
         self.cal_off_button.clicked.connect(lambda: self.send_command(0x04, b"\x00"))
         self.reset_button.clicked.connect(lambda: self.send_command(0x06, b""))
         self.raw_send_button.clicked.connect(self.send_raw_hex)
+        self.acquisition_combo.currentIndexChanged.connect(self.acquire_combo_changed)
+        self.capture_button.clicked.connect(self.capture_point)
 
     def refresh_ports(self) -> None:
         current = self.port_combo.currentText()
@@ -271,6 +283,10 @@ class SunMainWindow(QMainWindow):
         self.latest_stats = stats
 
     def on_telemetry(self, telemetry) -> None:
+        if self.acquisition_combo.currentData() == "on_demand":
+            if not self._capture_pending:
+                return
+            self._capture_pending = False
         self._last_telemetry_time = time.monotonic()
         self.monitor.update_telemetry(telemetry, self.latest_stats)
         if self.logger.is_active:
@@ -315,6 +331,19 @@ class SunMainWindow(QMainWindow):
             self.on_error(str(exc))
             return
         self.append_event(f"Raw hex: {data.hex(' ').upper()}")
+
+    def capture_point(self) -> None:
+        if not self.host.is_running:
+            self.append_event("采集: 未连接")
+            return
+        self._capture_pending = True
+        if isinstance(self.host._thread, SerialThread):
+            self.send_command(0x01, b"")
+        self.append_event("采集: 等待数据...")
+
+    def acquire_combo_changed(self) -> None:
+        on_demand = self.acquisition_combo.currentData() == "on_demand"
+        self.capture_button.setEnabled(on_demand)
 
     def current_calibration(self) -> CalibrationContext:
         return CalibrationContext(
