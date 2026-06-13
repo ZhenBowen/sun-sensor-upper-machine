@@ -41,8 +41,8 @@ class SunMonitorWidget(QWidget):
         telemetry_layout = QGridLayout(telemetry_box)
         fields = [
             "seq",
-            "x",
-            "y",
+            "alpha",
+            "beta",
             "sun_present",
             "frame_rate_hz",
             "drop_count",
@@ -69,9 +69,9 @@ class SunMonitorWidget(QWidget):
 
         plot_panel = QWidget()
         plot_layout = QGridLayout(plot_panel)
-        self.xy_plot = pg.PlotWidget(title="Spot Position X-Y")
-        self.xy_plot.setLabel("left", "y")
-        self.xy_plot.setLabel("bottom", "x")
+        self.xy_plot = pg.PlotWidget(title="Spot Position Alpha-Beta")
+        self.xy_plot.setLabel("left", "Beta (\u00b0)")
+        self.xy_plot.setLabel("bottom", "Alpha (\u00b0)")
         self.xy_plot.showGrid(x=True, y=True, alpha=0.3)
         self.xy_plot.setAspectLocked(True)
         self.xy_curve = self.xy_plot.plot(
@@ -82,11 +82,11 @@ class SunMonitorWidget(QWidget):
             name="spot",
         )
 
-        self.trend_plot = pg.PlotWidget(title="Spot X/Y Trend")
-        self.trend_plot.setLabel("left", "position")
+        self.trend_plot = pg.PlotWidget(title="Alpha/Beta Trend")
+        self.trend_plot.setLabel("left", "Angle (\u00b0)")
         self.trend_plot.setLabel("bottom", "sample")
-        self.x_curve = self.trend_plot.plot(pen=pg.mkPen("#E4572E", width=2), name="x")
-        self.y_curve = self.trend_plot.plot(pen=pg.mkPen("#17BEBB", width=2), name="y")
+        self.x_curve = self.trend_plot.plot(pen=pg.mkPen("#E4572E", width=2), name="alpha")
+        self.y_curve = self.trend_plot.plot(pen=pg.mkPen("#17BEBB", width=2), name="beta")
         self.trend_plot.addLegend()
 
         plot_layout.addWidget(self.xy_plot, 0, 0)
@@ -97,8 +97,8 @@ class SunMonitorWidget(QWidget):
     def update_telemetry(self, telemetry: SunTelemetry, stats: TelemetryStats) -> None:
         values = {
             "seq": str(telemetry.seq),
-            "x": f"{telemetry.spot_x:.6f}",
-            "y": f"{telemetry.spot_y:.6f}",
+            "alpha": f"{telemetry.spot_x:.6f}",
+            "beta": f"{telemetry.spot_y:.6f}",
             "sun_present": "yes" if telemetry.sun_present else "no",
             "frame_rate_hz": f"{stats.frame_rate_hz:.2f}",
             "drop_count": str(stats.drop_count),
@@ -110,8 +110,8 @@ class SunMonitorWidget(QWidget):
 
         status_lines = [
             f"sun_present = {telemetry.sun_present}",
-            f"x = {telemetry.spot_x:.6f}",
-            f"y = {telemetry.spot_y:.6f}",
+            f"alpha = {telemetry.spot_x:.6f}",
+            f"beta = {telemetry.spot_y:.6f}",
         ]
         for name, value in telemetry.status_flags.items():
             status_lines.append(f"{name}: {'yes' if value else 'no'}")

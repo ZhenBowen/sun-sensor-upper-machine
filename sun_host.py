@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import deque
 import time
@@ -6,7 +6,7 @@ from typing import Optional
 
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
-from sun_protocol import EB90Parser, TelemetryParser, hex_text_to_bytes, pack_command
+from sun_protocol import EB90Parser, EB90TestParser, TelemetryParser, hex_text_to_bytes, pack_command
 from sun_simulator import SunSimulator
 
 try:
@@ -54,22 +54,26 @@ class _TelemetryThread(QThread):
 
 
 class SimulatorThread(_TelemetryThread):
-    def __init__(self, node_id: int = 1, rate_hz: float = 10.0, mode: str = "normal") -> None:
+    def __init__(self, node_id: int = 1, rate_hz: float = 10.0, mode: str = "normal", protocol: str = "recommended") -> None:
         super().__init__()
         self.node_id = node_id
         self.rate_hz = rate_hz
         self.mode = mode
+        self.protocol = protocol
 
     def run(self) -> None:
         self._running = True
         simulator = SunSimulator(node_id=self.node_id, rate_hz=self.rate_hz, mode=self.mode)
-        parser = TelemetryParser()
+        parser = self._make_parser()
         meter = RateMeter()
         interval_ms = max(1, int(round(1000.0 / max(self.rate_hz, 0.1))))
-        self.status_changed.emit(f"Simulator running: {self.mode}, {self.rate_hz:.1f} Hz")
+        self.status_changed.emit(f"Simulator running: {self.mode}, {self.rate_hz:.1f} Hz, protocol={self.protocol}")
 
         while self._running:
-            frame = simulator.next_frame()
+            if self.protocol == "eb90_test":
+                frame = simulator.next_eb90_test_frame()
+            else:
+                frame = simulator.next_frame()
             self.raw_bytes_received.emit(frame)
             for telemetry in parser.feed(frame):
                 rate = meter.mark()
@@ -79,6 +83,13 @@ class SimulatorThread(_TelemetryThread):
             self.msleep(interval_ms)
 
         self.status_changed.emit("Simulator stopped")
+
+    def _make_parser(self):
+        if self.protocol == "eb90":
+            return EB90Parser()
+        if self.protocol == "eb90_test":
+            return EB90TestParser()
+        return TelemetryParser()
 
 
 class SerialThread(_TelemetryThread):
@@ -141,9 +152,11 @@ class SerialThread(_TelemetryThread):
         except Exception:
             pass
 
-    def _make_parser(self):
+def _make_parser(self):
         if self.protocol == "eb90":
             return EB90Parser()
+        if self.protocol == "eb90_test":
+            return EB90TestParser()
         return TelemetryParser()
 
 
@@ -162,9 +175,9 @@ class SunHost(QObject):
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
 
-    def start_simulator(self, node_id: int = 1, rate_hz: float = 10.0, mode: str = "normal") -> None:
+    def start_simulator(self, node_id: int = 1, rate_hz: float = 10.0, mode: str = "normal", protocol: str = "recommended") -> None:
         self.stop()
-        self._thread = SimulatorThread(node_id=node_id, rate_hz=rate_hz, mode=mode)
+        self._thread = SimulatorThread(node_id=node_id, rate_hz=rate_hz, mode=mode, protocol=protocol)
         self._connect_thread_signals(self._thread)
         self._thread.start()
 

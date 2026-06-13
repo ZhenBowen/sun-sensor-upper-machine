@@ -99,6 +99,10 @@ class SpotTelemetry:
     timestamp_ms: int = 0
     status_word: int = 0
     saturation_flag: int = 0
+    adc_vax1: int = 0
+    adc_vax2: int = 0
+    adc_vay1: int = 0
+    adc_vay2: int = 0
     received_time_ms: int = field(default_factory=now_ms)
 
     @property
@@ -122,36 +126,26 @@ class SpotTelemetry:
         return 0.0
 
     @property
-    def adc_vax1(self) -> int:
-        return 0
-
-    @property
-    def adc_vax2(self) -> int:
-        return 0
-
-    @property
-    def adc_vay1(self) -> int:
-        return 0
-
-    @property
-    def adc_vay2(self) -> int:
-        return 0
-
-    @property
     def valid_flag(self) -> bool:
         return bool(self.sun_present)
 
     @property
     def signal_sum(self) -> int:
-        return 0
+        return self.adc_vax1 + self.adc_vax2 + self.adc_vay1 + self.adc_vay2
 
     @property
     def rx(self) -> float:
-        return self.x
+        denom = self.adc_vax1 + self.adc_vax2
+        if denom <= 0:
+            return 0.0
+        return (self.adc_vax2 - self.adc_vax1) / denom
 
     @property
     def ry(self) -> float:
-        return self.y
+        denom = self.adc_vay1 + self.adc_vay2
+        if denom <= 0:
+            return 0.0
+        return (self.adc_vay2 - self.adc_vay1) / denom
 
     @property
     def status_flags(self) -> Dict[str, bool]:

@@ -5,7 +5,7 @@ import random
 from dataclasses import dataclass
 
 from sun_models import SunTelemetry
-from sun_protocol import pack_telemetry
+from sun_protocol import pack_eb90_test_frame, pack_telemetry
 
 
 @dataclass
@@ -69,6 +69,23 @@ class SunSimulator:
     def next_frame(self) -> bytes:
         telemetry = self.next_telemetry()
         frame = bytearray(pack_telemetry(telemetry))
+        if self.mode == "crc_error" and self.crc_error_every > 0 and self._frame_index % self.crc_error_every == 0:
+            frame[-1] ^= 0xFF
+        return bytes(frame)
+
+    def next_eb90_test_frame(self) -> bytes:
+        telemetry = self.next_telemetry()
+        frame = bytearray(
+            pack_eb90_test_frame(
+                sun_present=telemetry.sun_present & 0x01,
+                alpha=telemetry.alpha_deg,
+                beta=telemetry.beta_deg,
+                adc_vax1=telemetry.adc_vax1,
+                adc_vax2=telemetry.adc_vax2,
+                adc_vay1=telemetry.adc_vay1,
+                adc_vay2=telemetry.adc_vay2,
+            )
+        )
         if self.mode == "crc_error" and self.crc_error_every > 0 and self._frame_index % self.crc_error_every == 0:
             frame[-1] ^= 0xFF
         return bytes(frame)

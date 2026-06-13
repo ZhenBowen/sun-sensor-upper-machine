@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
@@ -83,7 +83,8 @@ class SunMainWindow(QMainWindow):
 
         self.protocol_combo = QComboBox()
         self.protocol_combo.addItem("Recommended 32-byte", "recommended")
-        self.protocol_combo.addItem("EB90 spot x/y", "eb90")
+        self.protocol_combo.addItem("EB90 26-byte (original)", "eb90")
+        self.protocol_combo.addItem("EB90 18-byte (test)", "eb90_test")
 
         self.port_combo = QComboBox()
         self.refresh_button = QPushButton("Refresh")
@@ -234,7 +235,8 @@ class SunMainWindow(QMainWindow):
                 "sim_crc": "crc_error",
                 "sim_drop": "drop_frame",
             }
-            self.host.start_simulator(node_id=node_id, rate_hz=float(self.rate_spin.value()), mode=mode_map[source])
+            protocol = self.protocol_combo.currentData()
+            self.host.start_simulator(node_id=node_id, rate_hz=float(self.rate_spin.value()), mode=mode_map[source], protocol=protocol)
 
         self.monitor.clear()
         self.connect_button.setText("Disconnect")
@@ -281,7 +283,7 @@ class SunMainWindow(QMainWindow):
                 self.log_status_label.setText("logging stopped by error")
                 self.on_error(f"CSV write failed: {exc}")
         self.statusBar().showMessage(
-            f"x={telemetry.spot_x:.4f} y={telemetry.spot_y:.4f} sun={telemetry.sun_present} rate={self.latest_stats.frame_rate_hz:.2f} Hz"
+            f"alpha={telemetry.spot_x:.4f} beta={telemetry.spot_y:.4f} sun={telemetry.sun_present} rate={self.latest_stats.frame_rate_hz:.2f} Hz"
         )
 
     def on_status(self, message: str) -> None:

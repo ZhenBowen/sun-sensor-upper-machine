@@ -9,15 +9,19 @@ if str(PROJECT_ROOT) not in sys.path:
 from sun_models import SunTelemetry
 from sun_protocol import (
     EB90Parser,
+    EB90TestParser,
     EB90_FRAME_LEN,
+    EB90_TEST_FRAME_LEN,
     TELEMETRY_FRAME_LEN,
     TelemetryParser,
     crc16_modbus,
     hex_text_to_bytes,
     pack_eb90_frame,
+    pack_eb90_test_frame,
     pack_command,
     pack_telemetry,
     parse_eb90_frame,
+    parse_eb90_test_frame,
     parse_telemetry_frame,
 )
 
@@ -181,8 +185,86 @@ class TestSunProtocol(unittest.TestCase):
         self.assertEqual(parsed, [])
         self.assertEqual(parser.crc_error_count, 1)
 
-    def test_hex_text_to_bytes_accepts_spaces_and_commas(self):
+def test_hex_text_to_bytes_accepts_spaces_and_commas(self):
         self.assertEqual(hex_text_to_bytes("eb 90, 11 00 8c"), b"\xEB\x90\x11\x00\x8C")
+
+
+class TestEB90TestProtocol(unittest.TestCase):
+    def test_pack_and_parse_round_trip(self):
+        frame = pack_eb90_test_frame(
+            sun_present=1, alpha=12.5, beta=-3.25,
+            adc_vax1=2327, adc_vax2=2330, adc_vay1=2347, adc_vay2=2328,
+        )
+        self.assertEqual(len(frame), EB90_TEST_FRAME_LEN)
+        self.assertEqual(frame[0], 1)
+        checksum = sum(frame[:-1]) & 0xFF
+        self.assertEqual(frame[-1], checksum)
+
+        parsed = parse_eb90_test_frame(frame)
+        self.assertEqual(parsed.sun_present, 1)
+        self.assertAlmostEqual(parsed.x, 12.5, places=4)
+        self.assertAlmostEqual(parsed.y, -3.25, places=4)
+        self.assertEqual(parsed.adc_vax1, 2327)
+        self.assertEqual(parsed.adc_vax2, 2330)
+        self.assertEqual(parsed.adc_vay1, 2347)
+        self.assertEqual(parsed.adc_vay2, 2328)
+
+    def test_parse_rejects_bad_checksum(self):
+        frame = bytearray(pack_eb90_test_frame(
+            sun_present=1, alpha=1.0, beta=2.0,
+            adc_vax1=100, adc_vax2=200, adc_vay1=300, adc_vay2=400,
+        ))
+        frame[-1] ^= 0xFF
+        parser = EB90TestParser()
+
+        parsed = parser.feed(bytes(frame))
+
+        self.assertEqual(parsed, [])
+        self.assertEqual(parser.crc_error_count, 1)
+
+    def test_parser_handles_sticky_frames(self):
+        frame_a = pack_eb90_test_frame(
+            sun_present=1, alpha=1.25, beta=2.5,
+            adc_vax1=100, adc_vax2=200, adc_vay1=300, adc_vay2=400,
+        )
+        frame_b = pack_eb90_test_frame(
+            sun_present=0, alpha=-4.0, beta=8.0,
+            adc_vax1=500, adc_vax2=600, adc_vay1=700, adc_vay2=800,
+        )
+        parser = EB90TestParser()
+
+        parsed = parser.feed(frame_a + frame_b)
+
+        self.assertEqual(len(parsed), 2)
+        self.assertAlmostEqual(parsed[0].x, 1.25, places=3)
+        self.assertAlmostEqual(parsed[0].y, 2.5, places=3)
+        self.assertAlmostEqual(parsed[1].x, -4.0, places=3)
+
+    def test_parser_rejects_invalid_sun_present(self):
+        frame = bytearray(pack_eb90_test_frame(
+            sun_present=1, alpha=0.0, beta=0.0,
+            adc_vax1=0, adc_vax2=0, adc_vay1=0, adc_vay2=0,
+        ))
+        frame[0] = 0x05
+        frame[-1] = sum(frame[:-1]) & 0xFF
+        parser = EB90TestParser()
+
+        parsed = parser.feed(bytes(frame))
+
+        self.assertEqual(len(parsed), 0)
+        self.assertEqual(parser.frame_error_count, 1)
+
+    def test_parser_recovers_from_noise(self):
+        good_frame = pack_eb90_test_frame(
+            sun_present=1, alpha=5.0, beta=-2.0,
+            adc_vax1=111, adc_vax2=222, adc_vay1=333, adc_vay2=444,
+        )
+        parser = EB90TestParser()
+
+        parsed = parser.feed(b"\x00\x00\x00" + good_frame)
+
+        self.assertEqual(len(parsed), 1)
+        self.assertAlmostEqual(parsed[0].x, 5.0, places=3)
 
 
 if __name__ == "__main__":

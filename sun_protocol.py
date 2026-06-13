@@ -14,8 +14,31 @@ MSG_TYPE_COMMAND = 0x80
 TELEMETRY_PAYLOAD_LEN = 24
 TELEMETRY_FRAME_LEN = 2 + 4 + TELEMETRY_PAYLOAD_LEN + 2
 MAX_PAYLOAD_LEN = 128
+# ---------------------------------------------------------------------------
+# EB90 26-byte format (original version, with SOF header)
+# Used by the original sun sensor hardware.
+# Frame: EB 90 + sun_present(1) + x(4 float BE) + y(4 float BE)
+#         + I_AX1(2) + I_AX2(2) + I_AY1(2) + I_AY2(2)
+#         + temp(1) + threshold(2) + gain(1) + err_cnt(1) + node_id(1)
+#         + checksum(1) = 26 bytes
+# Checksum: sum(byte[0:25]) & 0xFF
+# ---------------------------------------------------------------------------
 EB90_SOF = b"\xEB\x90"
 EB90_FRAME_LEN = 26
+
+# ---------------------------------------------------------------------------
+# EB90 18-byte test format (temporary, NO SOF header)
+# WARNING: No frame header for byte-stream synchronization.
+# Frame sync relies on checksum + sun_present filtering only.
+# Use ONLY for temporary hardware testing, NOT for production.
+# Frame: sun_present(1) + alpha(4 float BE) + beta(4 float BE)
+#         + I_AX1(2 uint16 BE) + I_AX2(2 uint16 BE) + I_AY1(2) + I_AY2(2)
+#         + checksum(1) = 18 bytes
+# Checksum: sum(byte[0:17]) & 0xFF == byte[17]
+# sun_present must be 0x00 or 0x01.
+# ---------------------------------------------------------------------------
+EB90_TEST_FRAME_LEN = 18
+_EB90_TEST_PAYLOAD = struct.Struct(">f f H H H H")
 
 _HEADER_STRUCT = struct.Struct("<HBBBB")
 _PAYLOAD_STRUCT = struct.Struct("<HIHHHHhhhBBH")
@@ -154,6 +177,50 @@ def pack_eb90_frame(sun_present: int, x: float, y: float, tail: bytes | None = N
         raise ValueError(f"EB90 tail must be {EB90_FRAME_LEN - 12} bytes")
     body = EB90_SOF + bytes([sun_present & 0xFF]) + _EB90_SPOT_STRUCT.pack(float(x), float(y)) + tail_bytes
     return body + bytes([sum(body) & 0xFF])
+
+
+def parse_eb90_test_frame(frame: bytes) -> SpotTelemetry:
+    if len(frame) != EB90_TEST_FRAME_LEN:
+        raise ProtocolError(f"invalid EB90 test frame length: {len(frame)}")
+    if frame[0] not in (0, 1):
+        raise ProtocolError(f"invalid EB90 test sun_present: {frame[0]:#04x}")
+    expected_checksum = sum(frame[:-1]) & 0xFF
+    actual_checksum = frame[-1]
+    if actual_checksum != expected_checksum:
+        raise BadCrcError(
+            f"bad EB90 test checksum: expected 0x{expected_checksum:02X}, got 0x{actual_checksum:02X}"
+        )
+    sun_present = frame[0]
+    alpha, beta, adc_vax1, adc_vax2, adc_vay1, adc_vay2 = _EB90_TEST_PAYLOAD.unpack(frame[1:17])
+    return SpotTelemetry(
+        sun_present=sun_present,
+        x=alpha,
+        y=beta,
+        adc_vax1=adc_vax1,
+        adc_vax2=adc_vax2,
+        adc_vay1=adc_vay1,
+        adc_vay2=adc_vay2,
+        raw_frame_hex=frame.hex(" ").upper(),
+    )
+
+
+def pack_eb90_test_frame(
+    sun_present: int,
+    alpha: float,
+    beta: float,
+    adc_vax1: int,
+    adc_vax2: int,
+    adc_vay1: int,
+    adc_vay2: int,
+) -> bytes:
+    payload = _EB90_TEST_PAYLOAD.pack(
+        float(alpha), float(beta),
+        adc_vax1 & 0xFFFF, adc_vax2 & 0xFFFF,
+        adc_vay1 & 0xFFFF, adc_vay2 & 0xFFFF,
+    )
+    body = bytes([sun_present & 0x01]) + payload
+    checksum = sum(body) & 0xFF
+    return body + bytes([checksum])
 
 
 def hex_text_to_bytes(text: str) -> bytes:
@@ -305,6 +372,58 @@ class EB90Parser:
             del self._buffer[:EB90_FRAME_LEN]
             self.frame_count += 1
             parsed.append(telemetry)
+
+        return parsed
+
+    def stats(self, frame_rate_hz: float = 0.0) -> TelemetryStats:
+        return TelemetryStats(
+            frame_rate_hz=frame_rate_hz,
+            drop_count=self.drop_count,
+            crc_error_count=self.crc_error_count,
+            frame_count=self.frame_count,
+            byte_count=self.byte_count,
+        )
+
+
+class EB90TestParser:
+    # WARNING: No SOF header. Frame sync relies on checksum + sun_present filter.
+    # Random noise passes checksum with ~1/12800 probability (sun_present + checksum).
+    # This parser is for temporary testing ONLY.
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self.crc_error_count = 0
+        self.frame_error_count = 0
+        self.drop_count = 0
+        self.frame_count = 0
+        self.byte_count = 0
+
+    def feed(self, data: bytes) -> List[SpotTelemetry]:
+        if not data:
+            return []
+        self.byte_count += len(data)
+        self._buffer.extend(data)
+        parsed: List[SpotTelemetry] = []
+
+        while len(self._buffer) >= EB90_TEST_FRAME_LEN:
+            candidate = bytes(self._buffer[:EB90_TEST_FRAME_LEN])
+            if candidate[0] not in (0, 1):
+                self.frame_error_count += 1
+                del self._buffer[0]
+                continue
+            try:
+                telemetry = parse_eb90_test_frame(candidate)
+                del self._buffer[:EB90_TEST_FRAME_LEN]
+                self.frame_count += 1
+                parsed.append(telemetry)
+                continue
+            except BadCrcError:
+                self.crc_error_count += 1
+                del self._buffer[0]
+                continue
+            except ProtocolError:
+                self.frame_error_count += 1
+                del self._buffer[0]
+                continue
 
         return parsed
 
