@@ -152,12 +152,12 @@ class SerialThread(_TelemetryThread):
         except Exception:
             pass
 
-def _make_parser(self):
-        if self.protocol == "eb90":
-            return EB90Parser()
-        if self.protocol == "eb90_test":
-            return EB90TestParser()
-        return TelemetryParser()
+    def _make_parser(self):
+            if self.protocol == "eb90":
+                return EB90Parser()
+            if self.protocol == "eb90_test":
+                return EB90TestParser()
+            return TelemetryParser()
 
 
 class SunHost(QObject):
