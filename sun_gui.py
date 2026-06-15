@@ -203,6 +203,7 @@ class SunMainWindow(QMainWindow):
         self.host.stats_updated.connect(self.on_stats)
         self.host.status_changed.connect(self.on_status)
         self.host.error_occurred.connect(self.on_error)
+        self.host.raw_bytes_received.connect(self.on_raw_bytes)
 
         self.query_button.clicked.connect(lambda: self.send_command(0x01, b""))
         self.rate10_button.clicked.connect(lambda: self.send_command(0x02, struct.pack("<H", 10)))
@@ -252,6 +253,8 @@ class SunMainWindow(QMainWindow):
 
         self.monitor.clear()
         self._capture_count = 0
+        self._raw_byte_count = 0
+        self._raw_logged_first = False
         self.capture_button.setText("采集")
         self.connect_button.setText("Disconnect")
 
@@ -320,7 +323,17 @@ class SunMainWindow(QMainWindow):
             self._last_error_dialog_time = now
             QMessageBox.warning(self, "Sun upper machine error", message)
 
+    def on_raw_bytes(self, data: bytes) -> None:
+        self._raw_byte_count += len(data)
+        if not self._raw_logged_first:
+            self._raw_logged_first = True
+            self.append_event(f"收到原始数据: {data.hex(' ').upper()[:60]}... (共{len(data)}字节)")
+
     def send_command(self, cmd_id: int, payload: bytes) -> None:
+        protocol = self.protocol_combo.currentData()
+        if protocol in ("eb90", "eb90_test"):
+            self.send_raw_hex()
+            return
         node_id = self.node_spin.value()
         try:
             data = self.host.send_command(node_id=node_id, cmd_id=cmd_id, payload=payload)
