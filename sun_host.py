@@ -12,11 +12,13 @@ from sun_simulator import SunSimulator
 try:
     import serial
     from serial.tools import list_ports
+    import serial.rs485 as _rs485
 
     SERIAL_AVAILABLE = True
 except ImportError:  # pragma: no cover - depends on local environment
     serial = None
     list_ports = None
+    _rs485 = None
     SERIAL_AVAILABLE = False
 
 
@@ -106,6 +108,7 @@ class SerialThread(_TelemetryThread):
         self.timeout_s = timeout_s
         self.protocol = protocol
         self._serial = None
+        self._rs485_manual = False
 
     def run(self) -> None:
         if not SERIAL_AVAILABLE:
@@ -117,16 +120,21 @@ class SerialThread(_TelemetryThread):
         meter = RateMeter()
         try:
             self._serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout_s)
-            if hasattr(serial, "rs485"):
-                self._serial.rs485_mode = serial.rs485.RS485Settings(
+            if _rs485 is not None:
+                self._serial.rs485_mode = _rs485.RS485Settings(
                     rts_level_for_tx=True,
                     rts_level_for_rx=False,
                     delay_before_tx=None,
                     delay_before_rx=None,
                 )
+                self._rs485_manual = False
             else:
                 self._serial.rts = False
-            self.status_changed.emit(f"Serial opened: {self.port} @ {self.baudrate}, protocol={self.protocol}")
+                self._rs485_manual = True
+            self.status_changed.emit(
+                f"Serial opened: {self.port} @ {self.baudrate}, protocol={self.protocol}"
+                + (" (RS485 auto)" if not self._rs485_manual else " (RS485 manual)")
+            )
             while self._running:
                 waiting = getattr(self._serial, "in_waiting", 0)
                 data = self._serial.read(waiting if waiting > 0 else 1)
@@ -151,8 +159,12 @@ class SerialThread(_TelemetryThread):
     def send(self, data: bytes) -> None:
         if self._serial is None or not self._serial.is_open:
             raise RuntimeError("serial port is not open")
+        if self._rs485_manual:
+            self._serial.rts = True
         self._serial.write(data)
         self._serial.flush()
+        if self._rs485_manual:
+            self._serial.rts = False
 
     def stop(self) -> None:
         self._running = False
