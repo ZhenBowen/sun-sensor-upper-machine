@@ -117,6 +117,16 @@ class SerialThread(_TelemetryThread):
         meter = RateMeter()
         try:
             self._serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout_s)
+            try:
+                import serial.rs485  # noqa: F811
+                self._serial.rs485_mode = serial.rs485.RS485Settings(
+                    rts_level_for_tx=True,
+                    rts_level_for_rx=False,
+                    delay_before_tx=None,
+                    delay_before_rx=None,
+                )
+            except (ImportError, AttributeError):
+                self._serial.rts = False
             self.status_changed.emit(f"Serial opened: {self.port} @ {self.baudrate}, protocol={self.protocol}")
             while self._running:
                 waiting = getattr(self._serial, "in_waiting", 0)
@@ -143,6 +153,7 @@ class SerialThread(_TelemetryThread):
         if self._serial is None or not self._serial.is_open:
             raise RuntimeError("serial port is not open")
         self._serial.write(data)
+        self._serial.flush()
 
     def stop(self) -> None:
         self._running = False
