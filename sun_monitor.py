@@ -26,6 +26,13 @@ class SunMonitorWidget(QWidget):
         self._sample = deque(maxlen=max_points)
         self._spot_x = deque(maxlen=max_points)
         self._spot_y = deque(maxlen=max_points)
+        self._currents: Dict[str, deque[float]] = {
+            "I_AX1": deque(maxlen=max_points),
+            "I_AX2": deque(maxlen=max_points),
+            "I_AY1": deque(maxlen=max_points),
+            "I_AY2": deque(maxlen=max_points),
+        }
+        self.latest_stats = TelemetryStats()
         self.value_labels: Dict[str, QLabel] = {}
         self._build_ui()
 
@@ -67,8 +74,6 @@ class SunMonitorWidget(QWidget):
         top_layout.addWidget(status_box, 0, 1)
         splitter.addWidget(top)
 
-        plot_panel = QWidget()
-        plot_layout = QGridLayout(plot_panel)
         self.xy_plot = pg.PlotWidget(title="Spot Position Alpha-Beta")
         self.xy_plot.setLabel("left", "Beta (\u00b0)")
         self.xy_plot.setLabel("bottom", "Alpha (\u00b0)")
@@ -89,12 +94,33 @@ class SunMonitorWidget(QWidget):
         self.y_curve = self.trend_plot.plot(pen=pg.mkPen("#17BEBB", width=2), name="beta")
         self.trend_plot.addLegend()
 
-        plot_layout.addWidget(self.xy_plot, 0, 0)
-        plot_layout.addWidget(self.trend_plot, 1, 0)
+        self.current_plot = pg.PlotWidget(title="Signal Trend")
+        self.current_plot.setLabel("left", "Signal (ADC)")
+        self.current_plot.setLabel("bottom", "sample")
+        self.current_plot.addLegend()
+        current_colors = ["#E4572E", "#17BEBB", "#F4D03F", "#9B59B6"]
+        self.current_curves = [
+            self.current_plot.plot(
+                pen=pg.mkPen(color, width=2),
+                name=name,
+            )
+            for name, color in zip(self._currents.keys(), current_colors)
+        ]
+
+        right_splitter = QSplitter(Qt.Vertical)
+        right_splitter.addWidget(self.trend_plot)
+        right_splitter.addWidget(self.current_plot)
+        right_splitter.setSizes([300, 300])
+
+        plot_panel = QSplitter(Qt.Horizontal)
+        plot_panel.addWidget(self.xy_plot)
+        plot_panel.addWidget(right_splitter)
+        plot_panel.setSizes([700, 700])
         splitter.addWidget(plot_panel)
         splitter.setSizes([260, 600])
 
     def update_telemetry(self, telemetry: SunTelemetry, stats: TelemetryStats) -> None:
+        self.latest_stats = stats
         values = {
             "seq": str(telemetry.seq),
             "alpha": f"{telemetry.spot_x:.6f}",
@@ -125,6 +151,8 @@ class SunMonitorWidget(QWidget):
         self._sample.clear()
         self._spot_x.clear()
         self._spot_y.clear()
+        for values in self._currents.values():
+            values.clear()
         self._refresh_plots()
 
     def _append_plot_data(self, telemetry: SunTelemetry) -> None:
@@ -132,6 +160,10 @@ class SunMonitorWidget(QWidget):
         self._sample.append(self._index)
         self._spot_x.append(telemetry.spot_x)
         self._spot_y.append(telemetry.spot_y)
+        self._currents["I_AX1"].append(telemetry.adc_vax1)
+        self._currents["I_AX2"].append(telemetry.adc_vax2)
+        self._currents["I_AY1"].append(telemetry.adc_vay1)
+        self._currents["I_AY2"].append(telemetry.adc_vay2)
 
     def _refresh_plots(self) -> None:
         samples = list(self._sample)
@@ -140,3 +172,5 @@ class SunMonitorWidget(QWidget):
         self.xy_curve.setData(spot_x, spot_y)
         self.x_curve.setData(samples, spot_x)
         self.y_curve.setData(samples, spot_y)
+        for curve, values in zip(self.current_curves, self._currents.values()):
+            curve.setData(samples, list(values))
