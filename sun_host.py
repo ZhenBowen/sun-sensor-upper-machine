@@ -117,15 +117,14 @@ class SerialThread(_TelemetryThread):
         meter = RateMeter()
         try:
             self._serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout_s)
-            try:
-                import serial.rs485  # noqa: F811
+            if hasattr(serial, "rs485"):
                 self._serial.rs485_mode = serial.rs485.RS485Settings(
                     rts_level_for_tx=True,
                     rts_level_for_rx=False,
                     delay_before_tx=None,
                     delay_before_rx=None,
                 )
-            except (ImportError, AttributeError):
+            else:
                 self._serial.rts = False
             self.status_changed.emit(f"Serial opened: {self.port} @ {self.baudrate}, protocol={self.protocol}")
             while self._running:
