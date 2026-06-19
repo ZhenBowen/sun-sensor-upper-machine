@@ -166,7 +166,7 @@ class SunMainWindow(QMainWindow):
     def _build_command_box(self) -> QGroupBox:
         box = QGroupBox("Reserved Commands")
         layout = QGridLayout(box)
-        self.raw_hex_edit = QLineEdit("eb 90 11 00 8c")
+        self.raw_hex_edit = QLineEdit("00 10 01 11")
         self.raw_send_button = QPushButton("Send Raw Hex")
         self.query_button = QPushButton("Query Telemetry")
         self.rate10_button = QPushButton("Set 10 Hz")
@@ -349,6 +349,8 @@ class SunMainWindow(QMainWindow):
             self.on_error(str(exc))
             return
         self.append_event(f"Raw hex: {data.hex(' ').upper()}")
+        if self.acquisition_combo.currentData() == "on_demand":
+            self._capture_pending = True
 
     def capture_point(self) -> None:
         if not self.host.is_running:
