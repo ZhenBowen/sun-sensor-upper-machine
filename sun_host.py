@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import threading
 import time
 from typing import Optional
 
@@ -56,35 +57,59 @@ class _TelemetryThread(QThread):
 
 
 class SimulatorThread(_TelemetryThread):
-    def __init__(self, node_id: int = 1, rate_hz: float = 10.0, mode: str = "normal", protocol: str = "recommended") -> None:
+    def __init__(self, node_id: int = 1, rate_hz: float = 10.0, mode: str = "normal", protocol: str = "recommended", continuous: bool = True) -> None:
         super().__init__()
         self.node_id = node_id
         self.rate_hz = rate_hz
         self.mode = mode
         self.protocol = protocol
+        self._continuous = continuous
+        self._trigger = threading.Event()
+
+    def trigger(self) -> None:
+        self._trigger.set()
 
     def run(self) -> None:
         self._running = True
         simulator = SunSimulator(node_id=self.node_id, rate_hz=self.rate_hz, mode=self.mode)
         parser = self._make_parser()
         meter = RateMeter()
-        interval_ms = max(1, int(round(1000.0 / max(self.rate_hz, 0.1))))
-        self.status_changed.emit(f"Simulator running: {self.mode}, {self.rate_hz:.1f} Hz, protocol={self.protocol}")
+        mode_desc = "continuous" if self._continuous else "single-shot"
+        self.status_changed.emit(f"Simulator ready ({mode_desc}, {self.rate_hz:.1f} Hz, protocol={self.protocol})")
 
-        while self._running:
-            if self.protocol == "eb90_test":
-                frame = simulator.next_eb90_test_frame()
-            else:
-                frame = simulator.next_frame()
-            self.raw_bytes_received.emit(frame)
-            for telemetry in parser.feed(frame):
-                rate = meter.mark()
-                stats = parser.stats(frame_rate_hz=rate)
-                self.stats_updated.emit(stats)
-                self.telemetry_received.emit(telemetry)
-            self.msleep(interval_ms)
+        if self._continuous:
+            self._run_continuous(simulator, parser, meter)
+        else:
+            self._run_single_shot(simulator, parser, meter)
 
         self.status_changed.emit("Simulator stopped")
+
+    def _run_continuous(self, simulator: SunSimulator, parser, meter: RateMeter) -> None:
+        interval_ms = max(1, int(round(1000.0 / max(self.rate_hz, 0.1))))
+        while self._running:
+            self._generate_one(simulator, parser, meter)
+            self.msleep(interval_ms)
+
+    def _run_single_shot(self, simulator: SunSimulator, parser, meter: RateMeter) -> None:
+        while self._running:
+            self._trigger.wait(timeout=0.5)
+            if not self._running:
+                break
+            if self._trigger.is_set():
+                self._trigger.clear()
+                self._generate_one(simulator, parser, meter)
+
+    def _generate_one(self, simulator: SunSimulator, parser, meter: RateMeter) -> None:
+        if self.protocol == "eb90_test":
+            frame = simulator.next_eb90_test_frame()
+        else:
+            frame = simulator.next_frame()
+        self.raw_bytes_received.emit(frame)
+        for telemetry in parser.feed(frame):
+            rate = meter.mark()
+            stats = parser.stats(frame_rate_hz=rate)
+            self.stats_updated.emit(stats)
+            self.telemetry_received.emit(telemetry)
 
     def _make_parser(self):
         if self.protocol == "eb90":
@@ -197,9 +222,9 @@ class SunHost(QObject):
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
 
-    def start_simulator(self, node_id: int = 1, rate_hz: float = 10.0, mode: str = "normal", protocol: str = "recommended") -> None:
+    def start_simulator(self, node_id: int = 1, rate_hz: float = 10.0, mode: str = "normal", protocol: str = "recommended", continuous: bool = True) -> None:
         self.stop()
-        self._thread = SimulatorThread(node_id=node_id, rate_hz=rate_hz, mode=mode, protocol=protocol)
+        self._thread = SimulatorThread(node_id=node_id, rate_hz=rate_hz, mode=mode, protocol=protocol, continuous=continuous)
         self._connect_thread_signals(self._thread)
         self._thread.start()
 
@@ -233,6 +258,10 @@ class SunHost(QObject):
         else:
             self.status_changed.emit(f"Raw hex built but not sent: {data.hex(' ').upper()}")
         return data
+
+    def trigger_single(self) -> None:
+        if isinstance(self._thread, SimulatorThread) and self._thread.isRunning():
+            self._thread.trigger()
 
     def _connect_thread_signals(self, thread: _TelemetryThread) -> None:
         thread.telemetry_received.connect(self.telemetry_received)

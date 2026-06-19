@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-import struct
 import time
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QAction,
-    QApplication,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -19,15 +17,15 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QPlainTextEdit,
+    QPushButton,
     QSpinBox,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
-from sun_host import SerialThread, SunHost, available_serial_ports
+from sun_host import SerialThread, SimulatorThread, SunHost, available_serial_ports
 from sun_logger import SunCsvLogger
 from sun_models import CalibrationContext, TelemetryStats
 from sun_monitor import SunMonitorWidget
@@ -46,19 +44,26 @@ class SunMainWindow(QMainWindow):
         self._error_dialog_interval_s = 5.0
         self._last_telemetry_time = 0.0
         self._data_timeout_s = 5.0
-        self._capture_pending = False
+        self._raw_byte_count = 0
+        self._raw_logged_first = False
+        self._acquiring = False
+        self._auto_sent = 0
+        self._acq_timer = QTimer(self)
+        self._acq_timer.timeout.connect(self._on_acq_timer)
         self._build_ui()
         self._connect_signals()
         self._timeout_timer = QTimer(self)
         self._timeout_timer.timeout.connect(self._check_timeout)
         self._timeout_timer.start(2000)
         self.refresh_ports()
+        self._update_mode_ui()
         self.statusBar().showMessage("Ready")
 
     def _build_ui(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
         root.addWidget(self._build_connection_box())
+        root.addWidget(self._build_acquisition_box())
 
         splitter = QSplitter(Qt.Horizontal)
         self.monitor = SunMonitorWidget()
@@ -94,14 +99,6 @@ class SunMainWindow(QMainWindow):
         self.node_spin = QSpinBox()
         self.node_spin.setRange(0, 255)
         self.node_spin.setValue(1)
-        self.rate_spin = QSpinBox()
-        self.rate_spin.setRange(1, 100)
-        self.rate_spin.setValue(10)
-        self.acquisition_combo = QComboBox()
-        self.acquisition_combo.addItem("自动采集", "continuous")
-        self.acquisition_combo.addItem("逐点采集", "on_demand")
-        self.capture_button = QPushButton("采集")
-        self.capture_button.setEnabled(False)
         self.connect_button = QPushButton("Connect")
 
         layout.addWidget(QLabel("Source"))
@@ -115,13 +112,42 @@ class SunMainWindow(QMainWindow):
         layout.addWidget(self.baud_combo)
         layout.addWidget(QLabel("Node"))
         layout.addWidget(self.node_spin)
-        layout.addWidget(QLabel("Hz"))
-        layout.addWidget(self.rate_spin)
-        layout.addWidget(QLabel("Mode"))
-        layout.addWidget(self.acquisition_combo)
-        layout.addWidget(self.capture_button)
         layout.addStretch(1)
         layout.addWidget(self.connect_button)
+        return box
+
+    def _build_acquisition_box(self) -> QGroupBox:
+        box = QGroupBox("Acquisition")
+        layout = QHBoxLayout(box)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Single", "single")
+        self.mode_combo.addItem("Auto", "auto")
+
+        self.freq_spin = QSpinBox()
+        self.freq_spin.setRange(1, 1000)
+        self.freq_spin.setValue(10)
+        self.freq_spin.setSuffix(" Hz")
+
+        self.count_spin = QSpinBox()
+        self.count_spin.setRange(0, 99999)
+        self.count_spin.setValue(0)
+        self.count_spin.setSpecialValueText("Unlimited")
+
+        self.command_edit = QLineEdit("00 10 01 11")
+
+        self.send_stop_button = QPushButton("Send")
+
+        layout.addWidget(QLabel("Mode"))
+        layout.addWidget(self.mode_combo)
+        layout.addWidget(QLabel("Freq"))
+        layout.addWidget(self.freq_spin)
+        layout.addWidget(QLabel("Count"))
+        layout.addWidget(self.count_spin)
+        layout.addWidget(QLabel("(0=\u221e)"))
+        layout.addWidget(QLabel("Command"))
+        layout.addWidget(self.command_edit, 1)
+        layout.addWidget(self.send_stop_button)
         return box
 
     def _build_side_panel(self) -> QWidget:
@@ -129,7 +155,6 @@ class SunMainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.addWidget(self._build_logging_box())
         layout.addWidget(self._build_calibration_box())
-        layout.addWidget(self._build_command_box())
         layout.addWidget(self._build_event_box(), 1)
         return panel
 
@@ -163,26 +188,6 @@ class SunMainWindow(QMainWindow):
         layout.addRow("comment", self.comment_edit)
         return box
 
-    def _build_command_box(self) -> QGroupBox:
-        box = QGroupBox("Reserved Commands")
-        layout = QGridLayout(box)
-        self.raw_hex_edit = QLineEdit("00 10 01 11")
-        self.raw_send_button = QPushButton("Send Raw Hex")
-        self.query_button = QPushButton("Query Telemetry")
-        self.rate10_button = QPushButton("Set 10 Hz")
-        self.cal_on_button = QPushButton("Cal Mode On")
-        self.cal_off_button = QPushButton("Cal Mode Off")
-        self.reset_button = QPushButton("Reset Device")
-        layout.addWidget(QLabel("Raw Hex"), 0, 0)
-        layout.addWidget(self.raw_hex_edit, 0, 1)
-        layout.addWidget(self.raw_send_button, 1, 0, 1, 2)
-        layout.addWidget(self.query_button, 2, 0)
-        layout.addWidget(self.rate10_button, 2, 1)
-        layout.addWidget(self.cal_on_button, 3, 0)
-        layout.addWidget(self.cal_off_button, 3, 1)
-        layout.addWidget(self.reset_button, 4, 0, 1, 2)
-        return box
-
     def _build_event_box(self) -> QGroupBox:
         box = QGroupBox("Event Log")
         layout = QVBoxLayout(box)
@@ -197,7 +202,9 @@ class SunMainWindow(QMainWindow):
         self.connect_button.clicked.connect(self.toggle_connection)
         self.browse_log_button.clicked.connect(self.choose_log_dir)
         self.log_button.clicked.connect(self.toggle_logging)
-        self.acquire_combo_changed()
+        self.send_stop_button.clicked.connect(self.toggle_acquisition)
+        self.mode_combo.currentIndexChanged.connect(self._update_mode_ui)
+        self.source_combo.currentIndexChanged.connect(self._update_source_ui)
 
         self.host.telemetry_received.connect(self.on_telemetry)
         self.host.stats_updated.connect(self.on_stats)
@@ -205,14 +212,16 @@ class SunMainWindow(QMainWindow):
         self.host.error_occurred.connect(self.on_error)
         self.host.raw_bytes_received.connect(self.on_raw_bytes)
 
-        self.query_button.clicked.connect(lambda: self.send_command(0x01, b""))
-        self.rate10_button.clicked.connect(lambda: self.send_command(0x02, struct.pack("<H", 10)))
-        self.cal_on_button.clicked.connect(lambda: self.send_command(0x04, b"\x01"))
-        self.cal_off_button.clicked.connect(lambda: self.send_command(0x04, b"\x00"))
-        self.reset_button.clicked.connect(lambda: self.send_command(0x06, b""))
-        self.raw_send_button.clicked.connect(self.send_raw_hex)
-        self.acquisition_combo.currentIndexChanged.connect(self.acquire_combo_changed)
-        self.capture_button.clicked.connect(self.capture_point)
+    def _update_mode_ui(self) -> None:
+        is_auto = self.mode_combo.currentData() == "auto"
+        self.freq_spin.setEnabled(is_auto)
+        self.count_spin.setEnabled(is_auto)
+
+    def _update_source_ui(self) -> None:
+        is_serial = self.source_combo.currentData() == "serial"
+        self.port_combo.setEnabled(is_serial)
+        self.baud_combo.setEnabled(is_serial)
+        self.refresh_button.setEnabled(is_serial)
 
     def refresh_ports(self) -> None:
         current = self.port_combo.currentText()
@@ -227,6 +236,7 @@ class SunMainWindow(QMainWindow):
 
     def toggle_connection(self) -> None:
         if self.host.is_running:
+            self._stop_acquisition()
             self.host.stop()
             self.connect_button.setText("Connect")
             self.statusBar().showMessage("Disconnected")
@@ -249,14 +259,108 @@ class SunMainWindow(QMainWindow):
                 "sim_drop": "drop_frame",
             }
             protocol = self.protocol_combo.currentData()
-            self.host.start_simulator(node_id=node_id, rate_hz=float(self.rate_spin.value()), mode=mode_map[source], protocol=protocol)
+            mode_str = mode_map[source]
+            is_auto = self.mode_combo.currentData() == "auto"
+            if is_auto:
+                self.host.start_simulator(node_id=node_id, rate_hz=float(self.freq_spin.value()), mode=mode_str, protocol=protocol, continuous=True)
+            else:
+                self.host.start_simulator(node_id=node_id, rate_hz=float(self.freq_spin.value()), mode=mode_str, protocol=protocol, continuous=False)
 
         self.monitor.clear()
-        self._capture_count = 0
         self._raw_byte_count = 0
         self._raw_logged_first = False
-        self.capture_button.setText("采集")
         self.connect_button.setText("Disconnect")
+
+    def toggle_acquisition(self) -> None:
+        if not self.host.is_running:
+            QMessageBox.information(self, "Not connected", "Connect to a source first.")
+            return
+
+        if self._acquiring:
+            self._stop_acquisition()
+            return
+
+        mode = self.mode_combo.currentData()
+        if mode == "single":
+            self._trigger_single()
+        else:
+            self._start_auto()
+
+    def _trigger_single(self) -> None:
+        if isinstance(self.host._thread, SimulatorThread):
+            self.host.trigger_single()
+            self.append_event("Single: triggered simulator frame")
+        else:
+            try:
+                data = self.host.send_raw_hex(self.command_edit.text())
+                self.append_event(f"Single: sent {data.hex(' ').upper()}")
+            except Exception as exc:
+                self.on_error(str(exc))
+
+    def _start_auto(self) -> None:
+        freq = max(self.freq_spin.value(), 1)
+        self._auto_sent = 0
+        self._acquiring = True
+        self.send_stop_button.setText("Stop")
+        self.mode_combo.setEnabled(False)
+        self.freq_spin.setEnabled(False)
+        self.count_spin.setEnabled(False)
+        self.command_edit.setEnabled(False)
+        self.source_combo.setEnabled(False)
+        self.protocol_combo.setEnabled(False)
+        self.connect_button.setEnabled(False)
+
+        if isinstance(self.host._thread, SimulatorThread):
+            self.append_event(f"Auto: simulator continuous at {freq} Hz")
+        else:
+            try:
+                data = self.host.send_raw_hex(self.command_edit.text())
+                self.append_event(f"Auto: started, first command sent ({data.hex(' ').upper()})")
+            except Exception as exc:
+                self.on_error(str(exc))
+                self._stop_acquisition()
+                return
+
+        interval_ms = max(10, int(1000.0 / freq))
+        self._acq_timer.start(interval_ms)
+
+    def _stop_acquisition(self) -> None:
+        self._acq_timer.stop()
+        self._acquiring = False
+        self.send_stop_button.setText("Send")
+        self.mode_combo.setEnabled(True)
+        self.command_edit.setEnabled(True)
+        self.source_combo.setEnabled(True)
+        self.protocol_combo.setEnabled(True)
+        self.connect_button.setEnabled(True)
+        self._update_mode_ui()
+
+        if isinstance(self.host._thread, SimulatorThread):
+            pass
+        else:
+            self.append_event(f"Auto: stopped after {self._auto_sent} commands")
+
+    def _on_acq_timer(self) -> None:
+        if not self.host.is_running:
+            self._stop_acquisition()
+            return
+
+        target = self.count_spin.value()
+        if target > 0 and self._auto_sent >= target:
+            self._stop_acquisition()
+            return
+
+        if isinstance(self.host._thread, SimulatorThread):
+            self.host.trigger_single()
+        else:
+            try:
+                self.host.send_raw_hex(self.command_edit.text())
+            except Exception as exc:
+                self.on_error(str(exc))
+                self._stop_acquisition()
+                return
+
+        self._auto_sent += 1
 
     def choose_log_dir(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Select log directory", self.log_dir_edit.text())
@@ -288,13 +392,6 @@ class SunMainWindow(QMainWindow):
         self.latest_stats = stats
 
     def on_telemetry(self, telemetry) -> None:
-        if self.acquisition_combo.currentData() == "on_demand":
-            if not self._capture_pending:
-                return
-            self._capture_pending = False
-            self._capture_count += 1
-            self.capture_button.setText(f"采集({self._capture_count})")
-            self.append_event(f"采集 #{self._capture_count}: alpha={telemetry.spot_x:.4f} beta={telemetry.spot_y:.4f}")
         self._last_telemetry_time = time.monotonic()
         self.monitor.update_telemetry(telemetry, self.latest_stats)
         if self.logger.is_active:
@@ -329,49 +426,6 @@ class SunMainWindow(QMainWindow):
             self._raw_logged_first = True
             self.append_event(f"收到原始数据: {data.hex(' ').upper()[:60]}... (共{len(data)}字节)")
 
-    def send_command(self, cmd_id: int, payload: bytes) -> None:
-        protocol = self.protocol_combo.currentData()
-        if protocol in ("eb90", "eb90_test"):
-            self.send_raw_hex()
-            return
-        node_id = self.node_spin.value()
-        try:
-            data = self.host.send_command(node_id=node_id, cmd_id=cmd_id, payload=payload)
-        except Exception as exc:
-            self.on_error(str(exc))
-            return
-        self.append_event(f"Command 0x{cmd_id:02X}: {data.hex(' ')}")
-
-    def send_raw_hex(self) -> None:
-        try:
-            data = self.host.send_raw_hex(self.raw_hex_edit.text())
-        except Exception as exc:
-            self.on_error(str(exc))
-            return
-        self.append_event(f"Raw hex: {data.hex(' ').upper()}")
-        if self.acquisition_combo.currentData() == "on_demand":
-            self._capture_pending = True
-
-    def capture_point(self) -> None:
-        if not self.host.is_running:
-            self.append_event("采集: 未连接")
-            return
-        self._capture_pending = True
-        if isinstance(self.host._thread, SerialThread):
-            self.send_command(0x01, b"")
-            self.append_event("采集: 已发送查询指令, 等待回帧...")
-        else:
-            self.append_event("采集: 等待下一帧模拟数据...")
-        self.statusBar().showMessage("采集: 等待数据...")
-
-    def acquire_combo_changed(self) -> None:
-        on_demand = self.acquisition_combo.currentData() == "on_demand"
-        self.capture_button.setEnabled(on_demand)
-        if not on_demand:
-            self._capture_pending = False
-            self._capture_count = 0
-            self.capture_button.setText("采集")
-
     def current_calibration(self) -> CalibrationContext:
         return CalibrationContext(
             alpha_ref_deg=self._float_from_edit(self.alpha_ref_edit, 0.0),
@@ -401,6 +455,7 @@ class SunMainWindow(QMainWindow):
             return default
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        self._stop_acquisition()
         self.host.stop()
         self.logger.stop()
         event.accept()
