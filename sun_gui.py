@@ -86,11 +86,13 @@ class SunMainWindow(QMainWindow):
         self.source_combo.addItem("Simulator: CRC error", "sim_crc")
         self.source_combo.addItem("Simulator: drop frame", "sim_drop")
         self.source_combo.addItem("Serial / USB-RS485", "serial")
+        self.source_combo.setCurrentIndex(3)
 
         self.protocol_combo = QComboBox()
         self.protocol_combo.addItem("Recommended 32-byte", "recommended")
         self.protocol_combo.addItem("EB90 26-byte (original)", "eb90")
         self.protocol_combo.addItem("EB90 18-byte (test)", "eb90_test")
+        self.protocol_combo.setCurrentIndex(2)
 
         self.port_combo = QComboBox()
         self.refresh_button = QPushButton("Refresh")
