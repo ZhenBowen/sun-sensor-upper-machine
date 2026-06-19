@@ -137,6 +137,7 @@ class SunMainWindow(QMainWindow):
         self.command_edit = QLineEdit("00 10 01 11")
 
         self.send_stop_button = QPushButton("Send")
+        self.clear_button = QPushButton("Clear")
 
         layout.addWidget(QLabel("Mode"))
         layout.addWidget(self.mode_combo)
@@ -148,6 +149,7 @@ class SunMainWindow(QMainWindow):
         layout.addWidget(QLabel("Command"))
         layout.addWidget(self.command_edit, 1)
         layout.addWidget(self.send_stop_button)
+        layout.addWidget(self.clear_button)
         return box
 
     def _build_side_panel(self) -> QWidget:
@@ -203,6 +205,7 @@ class SunMainWindow(QMainWindow):
         self.browse_log_button.clicked.connect(self.choose_log_dir)
         self.log_button.clicked.connect(self.toggle_logging)
         self.send_stop_button.clicked.connect(self.toggle_acquisition)
+        self.clear_button.clicked.connect(self.clear_monitor)
         self.mode_combo.currentIndexChanged.connect(self._update_mode_ui)
         self.source_combo.currentIndexChanged.connect(self._update_source_ui)
 
@@ -433,6 +436,12 @@ class SunMainWindow(QMainWindow):
             test_point=self.test_point_edit.text().strip(),
             comment=self.comment_edit.text().strip(),
         )
+
+    def clear_monitor(self) -> None:
+        self.monitor.clear()
+        self._raw_byte_count = 0
+        self._raw_logged_first = False
+        self.append_event("Monitor cleared")
 
     def append_event(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
